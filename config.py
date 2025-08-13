@@ -31,6 +31,11 @@ parser.add_argument("--clip", type=float, default=1)
 # Training Parameters for Contrastive Learning
 parser.add_argument("--temperature", type=float, default=0.07)
 
+# Training Parameters for Training a Small Subset
+parser.add_argument('--subset_pct', type=float, default=100, help='Percent of training data to use (1–100)')
+
+# Training Parameters for Prune Amount
+parser.add_argument('--prune-amount', type=float, default=0.1, help='Proportion of weights to prune')
 
 # Data Parameters
 parser.add_argument('--data', type=str, default="whole")

@@ -30,6 +30,7 @@ def get_data(args):
     ]
     df_tab = df_tab.loc[~df_tab.FileName.isin(exclude_list)]
 
+    df_tab["PatientAge"] = pd.to_numeric(df_tab["PatientAge"], errors="coerce")
     df_tab = df_tab.loc[df_tab.PatientAge >= 18].copy()
     df_tab["age_bucket"] = pd.cut(
         df_tab.PatientAge, bins=[17, 34, 44, 49, 54, 59, 64, 69, 74, 79, 84, 100]
@@ -48,6 +49,13 @@ def get_data(args):
     test_ids = np.load("./stores/test_ids.npy", allow_pickle=True)
 
     train_df = df_tab[df_tab["FileName"].isin(train_ids)]
+    
+    # --- SUBSAMPLE TRAINING DATA IF SPECIFIED ---
+    if hasattr(args, 'subset_pct') and args.subset_pct < 100:
+        subset_size = max(1, int(len(train_df) * args.subset_pct / 100))
+        train_df = train_df.sample(n=subset_size, random_state=args.seed).reset_index(drop=True)
+        print(f"[INFO] Using subset of training data: {subset_size} samples ({args.subset_pct}%)")
+
     val_df = df_tab[df_tab["FileName"].isin(val_ids)]
     test_df = df_tab[df_tab["FileName"].isin(test_ids)]
 #     print(len(train_df), len(val_df), len(test_df))
@@ -58,39 +66,6 @@ def get_data(args):
         ).codes
     elif args.viewtype == "rhythm":
         df_tab["group"] = df_tab.copy().y
-    elif args.viewtype == "simclr":
-        df_tab = df_tab.sample(frac=1)
-
-        if ~args.no_preaug:
-            with open(os.path.join(args.dir_csv, args.preaug_fname), "rb") as f:
-                df_tab = pickle.load(f)
-        else:
-            df_tab = pd.concat(
-                [replicates_row(row, args.num_augments) for _, row in df_tab.iterrows()],
-                ignore_index=True,
-                axis=1,
-            ).T  # replicates rows for number of augment_types
-
-            def _augment_rows(row, num_augments):
-                augment_type = (
-                    row.name % num_augments
-                )  # specify type of augments by modulo operation
-                file = row["FileName"]
-                fname = os.path.join(args.dir_csv, "ECGDataDenoised", f"{file}.csv")
-                x = pd.read_csv(fname, header=None).values.astype(np.float32)
-                x = x[
-                    np.newaxis, ...,
-                ]  # append batch dimension; [batch, timestamp, channel]; this is because our augment util gets the input w/ batch-dim.
-                x = augment(augment_type, x)
-                x = x[0, :, :]  # remove batch dim
-                row["x"] = x
-                return row
-
-            # df_tab = df_tab.head(n=1000) # this is just for debugging - use less number of rows to check the result fast
-
-            df_tab = df_tab.apply(lambda row: _augment_rows(row, args.num_augments), axis=1)
-            df_tab.to_pickle(os.path.join(args.dir_csv, args.preaug_fname))  # comment-out if want to save augmented x
-            pass
 
     elif args.viewtype == "attr":
         attrs = [
@@ -114,6 +89,32 @@ def get_data(args):
         pass
 
     elif args.viewtype == "simclr":
+        df_tab = df_tab.sample(frac=1)
+
+        if not args.no_preaug:  # Fix logic here: ~args.no_preaug is WRONG, should be `not`
+            with open(os.path.join(args.dir_csv, args.preaug_fname), "rb") as f:
+                df_tab = pickle.load(f)
+        else:
+            df_tab = pd.concat(
+                [replicates_row(row, args.num_augments) for _, row in df_tab.iterrows()],
+                ignore_index=True,
+                axis=1,
+            ).T
+
+            def _augment_rows(row, num_augments):
+                augment_type = row.name % num_augments
+                file = row["FileName"]
+                fname = os.path.join(args.dir_csv, "ECGDataDenoised", f"{file}.csv")
+                x = pd.read_csv(fname, header=None).values.astype(np.float32)
+                x = x[np.newaxis, ...]
+                x = augment(augment_type, x)
+                x = x[0, :, :]
+                row["x"] = x
+                return row
+
+            df_tab = df_tab.apply(lambda row: _augment_rows(row, args.num_augments), axis=1)
+            df_tab.to_pickle(os.path.join(args.dir_csv, args.preaug_fname))
+
         # batch-wise append
         train_df.index = range(len(train_df.index))  # re=index
         train_df = pd.concat(
