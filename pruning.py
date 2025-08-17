@@ -1,0 +1,177 @@
+import numpy as np
+from datetime import datetime
+from tqdm import tqdm
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.utils.prune as prune
+
+from config import args
+from data import get_data
+from model import get_model
+from utils.metrics import Evaluator
+from utils.logger import Logger
+from utils.utils import set_seeds, set_devices
+from utils.loss import get_contrastive_loss
+from utils.lr_scheduler import LR_Scheduler
+from sklearn.metrics import roc_auc_score
+from profiling import PerformanceMonitor
+
+# ------------------------------
+# Setup
+# ------------------------------
+seed = set_seeds(args)
+device = set_devices(args)
+logger = Logger(args)
+
+# Load Data, Create Model
+train_loader, val_loader, test_loader = get_data(args)
+model = get_model(args, device=device)
+
+nlabels = 4
+classifier = nn.Linear(args.embed_size, nlabels).to(device)
+
+optimizer = optim.Adam(model.parameters(), lr=args.lr)
+scheduler = LR_Scheduler(
+    optimizer, args.scheduler, args.lr, args.epochs,
+    from_iter=args.lr_sch_start, warmup_iters=args.warmup_iters, functional=True
+)
+
+# ------------------------------
+# Contrastive Training
+# ------------------------------
+pbar = tqdm(total=args.epochs, initial=0, bar_format="{desc:<5}{percentage:3.0f}%|{bar:10}{r_bar}")
+for epoch in range(1, args.epochs + 1):
+    loss = 0
+    for (idx, train_batch) in enumerate(train_loader):
+        if args.viewtype in ['clocstime', 'clocslead']:
+            train_x1, train_x2, train_y, train_group, train_fnames = train_batch
+            train_x = torch.cat((train_x1, train_x2), dim=0)
+            train_y = torch.cat((train_y, train_y), dim=0)
+            train_group = torch.cat((train_group, train_group), dim=0)
+        else:
+            train_x, train_y, train_group, train_fnames = train_batch
+
+        train_x, train_group = train_x.to(device), train_group.to(device)
+        encoded = model(train_x)
+
+        loss = get_contrastive_loss(args, encoded, train_group, device)
+        logger.loss += loss.item()
+
+        optimizer.zero_grad()
+        loss.backward()
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+        optimizer.step()
+        
+        if idx % args.log_iter == 0:
+            logger.log_tqdm(pbar)
+            logger.log_scalars(epoch*len(train_loader)+idx)
+            logger.loss_reset()
+    if epoch % args.save_iter == 0:
+        logger.save(model, optimizer, epoch)
+
+    pbar.update(1)
+
+if args.epochs > 0:
+    ckpt = logger.save(model, optimizer, epoch, last=True)
+    logger.writer.close()
+
+# ------------------------------
+# Downstream Classifier Training
+# ------------------------------
+model.eval()
+dw_criterion = nn.CrossEntropyLoss()
+dw_optimizer = torch.optim.SGD(classifier.parameters(), lr=args.dw_lr)
+
+pbar = tqdm(total=args.dw_epochs, initial=0, bar_format="{desc:<5}{percentage:3.0f}%|{bar:10}{r_bar}")
+for epoch in range(1, args.dw_epochs + 1):
+    loss = 0
+    classifier.train()
+    
+    for (idx, train_batch) in enumerate(train_loader):
+        if args.viewtype in ['clocstime', 'clocslead']:
+            train_x1, train_x2, train_y, train_group, train_fnames = train_batch
+            train_x = torch.cat((train_x1, train_x2), dim=0)
+            train_y = torch.cat((train_y, train_y), dim=0)
+            train_group = torch.cat((train_group, train_group), dim=0)
+        else:
+            train_x, train_y, train_group, train_fnames = train_batch
+        
+        train_x = train_x.to(device)
+
+        dw_pred = classifier(model(train_x))
+        dw_loss = dw_criterion(dw_pred, train_y.to(torch.long).to(device))
+        loss += dw_loss
+        
+        dw_optimizer.zero_grad()
+        dw_loss.backward()
+        dw_optimizer.step()
+        
+        if idx % args.log_iter == 0: 
+            tqdm_log = 'downstream_loss: {:.5f}'.format(loss/args.log_iter)
+            loss = 0
+            pbar.set_description(tqdm_log)
+    pbar.update(1)
+
+print("\n Finished training..........Starting Test")
+
+# ------------------------------
+# Baseline Test Evaluation
+# ------------------------------
+def evaluate(model, classifier, loader, nlabels, device, profile=False):
+    monitor = None
+    if profile:
+        monitor = PerformanceMonitor(interval=1)  # sample every 1s during eval
+        monitor.start()
+
+    with torch.no_grad():
+        model.eval()
+        classifier.eval()
+        y_pred, y_target = [], []
+
+        for (i,test_batch) in enumerate(loader):
+            if args.viewtype in ['clocstime', 'clocslead']:
+                test_x1, test_x2, test_y, test_group, test_fnames = test_batch
+                test_x = torch.cat((test_x1, test_x2), dim=0)
+                test_y = torch.cat((test_y, test_y), dim=0)
+            else:
+                test_x, test_y, test_group, test_fnames = test_batch
+
+            test_x = test_x.to(device)
+            test_pred = classifier(model(test_x))
+            y_pred.append(test_pred.cpu())
+            y_target.append(test_y)
+
+        y_pred = torch.cat(y_pred, dim=0).numpy()
+        y_target = nn.functional.one_hot(
+            torch.cat(y_target,dim=0).to(torch.int64), 
+            num_classes=nlabels
+        ).numpy()
+
+        auc = roc_auc_score(y_true=y_target, y_score=y_pred)
+    
+    if profile and monitor:
+        monitor.stop()
+        monitor.report()
+    
+    return auc
+
+# Evaluate before pruning
+baseline_auc = evaluate(model, classifier, test_loader, nlabels, device, profile=True)
+print(f"Test AUC (before pruning): {baseline_auc}")
+
+# ------------------------------
+# Pruning Step (classifier only)
+# ------------------------------
+if args.prune_amount > 0:
+    print(f"\nApplying pruning to classifier (amount={args.prune_amount})...")
+    prune.l1_unstructured(classifier, name="weight", amount=args.prune_amount)
+
+    # Make pruning permanent
+    prune.remove(classifier, "weight")
+
+    # Evaluate after pruning
+    pruned_auc = evaluate(model, classifier, test_loader, nlabels, device, profile=True)
+    print(f"Test AUC (after pruning): {pruned_auc}")
+
