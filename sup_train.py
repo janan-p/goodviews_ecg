@@ -29,29 +29,9 @@ model = get_model(args, device=device)
 nlabels = 4
 classifier = nn.Linear(args.embed_size, nlabels).to(device)
 
-# --- Global Unstructured Pruning ---
-# Collect parameters from Conv1d and Linear layers
-parameters_to_prune = []
-for module in model.modules():
-    if isinstance(module, nn.Conv1d) or isinstance(module, nn.Linear):
-        parameters_to_prune.append((module, 'weight'))
-
-# Add the classifier layer too
-parameters_to_prune.append((classifier, 'weight'))
-
-# Apply global unstructured pruning with 30% sparsity
-prune.global_unstructured(
-    parameters_to_prune,
-    pruning_method=prune.L1Unstructured,
-    amount=args.prune_amount,
-)
-
 criterion = nn.CrossEntropyLoss(reduction='none').to(device)
-optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()), lr=args.lr)
+optimizer = optim.Adam(model.parameters(), lr=args.lr)
 scheduler = LR_Scheduler(optimizer, args.scheduler, args.lr, args.epochs, from_iter=args.lr_sch_start, warmup_iters=args.warmup_iters, functional=True)
-
-for module, _ in parameters_to_prune:
-    prune.remove(module, 'weight')
 
 best_val_auc = 0
 best_epoch = -1
