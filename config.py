@@ -36,6 +36,7 @@ parser.add_argument('--subset_pct', type=float, default=100, help='Percent of tr
 
 # Training Parameters for Prune Amount
 parser.add_argument('--prune-amount', type=float, default=0.1, help='Proportion of weights to prune')
+parser.add_argument('--save-name', type=str, default="test")
 
 # Data Parameters
 parser.add_argument('--data', type=str, default="whole")

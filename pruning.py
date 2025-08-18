@@ -93,7 +93,7 @@ print(f"Pruned Test AUC (no fine-tune): {test_auc_pruned:.4f}")
 for module, _ in params_to_prune:
     prune.remove(module, 'weight')
 
-save_dir = f"{args.dir_result}/{args.name}/ckpts"
+save_dir = f"{args.dir_result}/{args.save-name}/ckpts"
 os.makedirs(save_dir, exist_ok=True)
 save_path = os.path.join(save_dir, "model_pruned.pth")
 
