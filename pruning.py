@@ -70,9 +70,7 @@ def collect_params(model, classifier):
     return params
 
 # Baseline Evaluation
-val_auc = eval_auc(val_loader)
 test_auc = eval_auc(test_loader)
-print(f"Baseline Val AUC:  {val_auc:.4f}")
 print(f"Baseline Test AUC: {test_auc:.4f}")
 
 # Apply Pruning
@@ -84,9 +82,7 @@ prune.global_unstructured(
 )
 print(f"Applied global unstructured pruning (amount={args.prune_amount})")
 
-val_auc_pruned = eval_auc(val_loader)
 test_auc_pruned = eval_auc(test_loader)
-print(f"Pruned Val AUC (no fine-tune):  {val_auc_pruned:.4f}")
 print(f"Pruned Test AUC (no fine-tune): {test_auc_pruned:.4f}")
 
 # Make pruning permanent & Save
